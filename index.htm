@@ -1,0 +1,789 @@
+<!--
+LiveSwitch web demo
+Purpose is to test features of the sdk and use native webRTC media
+
+TODO: Enable dataChannels
+      Support multiple sfuDownStreams
+      Dynamically create remote views
+      Add P2P and MCU support
+-->
+
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>LiveSwitch Web Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Frozen Mountain Software is the industry leader in creating powerful commercial software libraries for internet based real-time communications applications.">
+    <meta name="keywords" content="liveswitch, webrtc, sfu, mcu, p2p, real-time communications">
+    <link rel="script" href="fm.liveswitch.js">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<script type="text/javascript" src="fm.liveswitch.js"></script>
+
+<script>
+    fm.liveswitch.Util.addOnLoad(function () {
+        var gatewayUrl = "https://demo.liveswitch.fm:8443/sync";
+        var sharedSecret = "--replaceThisWithYourOwnSharedSecret--";
+        var iceServers = [
+                new fm.liveswitch.IceServer('stun:turn.frozenmountain.com:3478'),
+                new fm.liveswitch.IceServer('turn:turn.frozenmountain.com:80', 'test', 'pa55w0rd!'),
+                new fm.liveswitch.IceServer('turns:turn.frozenmountain.com:443', 'test', 'pa55w0rd!')
+            ];        
+        var mode = "SFU";
+        var userName;// = fm.liveswitch.Guid.newGuid().toString().replace(/-/g, '');
+        var applicationId = "my-app-id"; //"LSWebDemo"; //setting this to demo.liveswitch.fm appId for testing and connecting with default demo apps
+        var userId = fm.liveswitch.Guid.newGuid().toString().replace(/-/g, '');
+        var deviceId = fm.liveswitch.Guid.newGuid().toString().replace(/-/g, '');
+        var unRegistering = false;
+        var client;
+        var sfuDownstreamConnections = {};
+
+        var startLocalMediaNativeButton = document.getElementById("startLocalMediaNative");
+        var startLocalMediaFmButton = document.getElementById("startLocalMediaFm");
+        var stopLocalMediaButton = document.getElementById("stopLocalMedia");        
+        var joinSfuButton = document.getElementById("joinConference");
+        var muteLocalAudioButton = document.getElementById("muteLocalAudio");
+        var muteLocalVideoButton = document.getElementById("muteLocalVideo");
+        var muteRemoteAudioButton1 = document.getElementById("muteRemoteAudio1");
+        var muteRemoteVideoButton1 = document.getElementById("muteRemoteVideo1");
+        var leaveConferenceButton = document.getElementById("leaveConference");
+        var channelIdText = document.getElementById("channelId");
+        var resetChannelIdButton = document.getElementById("resetChannelId");
+        var audioInputsList = document.getElementById("audioInputs");
+        var videoInputsList = document.getElementById("videoInputs");
+        var localMediaContainer = document.getElementById("localVideo");
+        var remoteMediaContainer1 = document.getElementById("remoteVideo1");
+        var debugConsoleMessages = document.getElementById("debugConsoleMessages");
+        var upStreamStatsMonitorButton = document.getElementById("monitorUpstreamStats");
+        var downStreamStatsMonitorButton1 = document.getElementById("monitorDownstreamStats1");
+        var setUpstreamBitrate128Button = document.getElementById("setUpstreamBitrate128");
+        var setUpstreamBitrate512Button = document.getElementById("setUpstreamBitrate512");
+        var setUpstreamBitrate1024Button = document.getElementById("setUpstreamBitrate1024");
+        var currentUpStreamBitRate = 1024;
+        var upStreamSfuConnection = null;
+        var downstreamSfuConnection1 = null;
+        var remoteMedia1 = null;
+        var remoteAudio1Muted = false;
+        var remoteVideo1Muted = false;
+
+        fm.liveswitch.Log.registerProvider(new fm.liveswitch.ConsoleLogProvider(fm.liveswitch.LogLevel.Debug));
+        fm.liveswitch.Log.registerProvider(new fm.liveswitch.DomLogProvider(debugConsoleMessages, fm.liveswitch.LogLevel.Debug));
+
+        var localMediaRunning = false;
+        var connectedToConference = false;
+        var joinedConference = false;
+        var localMedia = null;
+        var localMediaStarting = false;
+        var localMediaStopping = false;
+        var joiningConference = false;
+        var leavingConference = false;
+
+        var nativeVideoStream;
+        var nativeAudioStream;
+        var upstreamStatsTimer;
+        var upstreamStatsTimerPaused = true;
+        var downstreamStatsTimer1;
+        var downstreamStatsTimer1Paused = true;        
+
+        fm.liveswitch.Util.observe(startLocalMediaNativeButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            startLocalMedia(true).then(localMedia => {
+                startLocalMediaNativeButton.innerHTML = "Start Local Media (Native)";
+                localMediaStarting = false;
+                localMediaRunning = true;
+                enableControls();
+                log("Local Media Started Successfully: NATIVE=TRUE");
+            });
+        });
+
+        fm.liveswitch.Util.observe(stopLocalMediaButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            stopLocalMedia().then(() => {
+                localMediaStopping = false;
+                localMediaRunning = false;
+                stopLocalMediaButton.innerHTML = "Stop Local Media";
+                enableControls();
+                log("Local Media Stopped");
+            });
+        }); 
+
+        fm.liveswitch.Util.observe(joinSfuButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            joinConference().then(() => {
+                joiningConference = false;
+                joinSfuButton.innerHTML = "Join";
+                log("Joined conference in SFU Mode");
+            });
+        });  
+
+        fm.liveswitch.Util.observe(muteLocalAudioButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            nativeAudioStream.getAudioTracks()[0].enabled = !nativeAudioStream.getAudioTracks()[0].enabled;
+            muteLocalAudioButton.innerHTML = nativeAudioStream.getAudioTracks()[0].enabled ? "Mute Local Audio" : "Unmute Local Audio";
+        });          
+
+        fm.liveswitch.Util.observe(muteLocalVideoButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            nativeVideoStream.getVideoTracks()[0].enabled = !nativeVideoStream.getVideoTracks()[0].enabled;
+            muteLocalVideoButton.innerHTML = nativeVideoStream.getVideoTracks()[0].enabled ? "Mute Local Video" : "Unmute Local Video";
+        });   
+
+
+        fm.liveswitch.Util.observe(muteRemoteAudioButton1, 'click', function (evt) {
+            evt.preventDefault();
+
+            remoteAudio1Muted = !(remoteAudio1Muted);
+            remoteMedia1.setAudioMuted(remoteAudio1Muted);
+            muteRemoteAudioButton1.innerHTML = remoteAudio1Muted===false ? "Mute Remote Audio" : "Unmute Remote Audio";
+            log("Setting Remote Audio Mute to: " + remoteAudio1Muted);            
+        }); 
+
+        fm.liveswitch.Util.observe(muteRemoteVideoButton1, 'click', function (evt) {
+            evt.preventDefault();
+
+            remoteVideo1Muted = !(remoteVideo1Muted);
+            remoteMedia1.setVideoMuted(remoteVideo1Muted);
+            muteRemoteVideoButton1.innerHTML = remoteVideo1Muted===false ? "Mute Remote Video" : "Unmute Remote Video";
+            log("Setting Remote Video Mute to: " + remoteVideo1Muted);            
+        });             
+
+        fm.liveswitch.Util.observe(setUpstreamBitrate128Button, 'click', function (evt) {
+            evt.preventDefault();
+
+            currentUpStreamBitRate = 128;
+            setBitrate(currentUpStreamBitRate, upStreamSfuConnection)
+            log("Limiting UpStream bandwidth to 128 kbps")
+        }); 
+
+        fm.liveswitch.Util.observe(setUpstreamBitrate512Button, 'click', function (evt) {
+            evt.preventDefault();
+
+            currentUpStreamBitRate = 512;
+            setBitrate(currentUpStreamBitRate, upStreamSfuConnection)
+            log("Limiting UpStream bandwidth to 512 kbps")
+        });        
+
+        fm.liveswitch.Util.observe(setUpstreamBitrate1024Button, 'click', function (evt) {
+            evt.preventDefault();
+
+            currentUpStreamBitRate = 1024;
+            setBitrate(currentUpStreamBitRate, upStreamSfuConnection)
+            log("Limiting UpStream bandwidth to 1024 kbps")
+        });        
+
+
+        fm.liveswitch.Util.observe(leaveConferenceButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            leaveConference().then(() => {
+                leavingConference = false;
+                joinedConference = false;
+                leaveConferenceButton.innerHTML = "Leave";
+                enableControls();
+                log("Left Conference");
+            });
+        });                
+
+        fm.liveswitch.Util.observe(resetChannelIdButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            var randomChannelId = Math.floor(100000 + Math.random() * 900000)
+            channelIdText.value = randomChannelId;
+
+        });               
+
+        fm.liveswitch.Util.observe(upStreamStatsMonitorButton, 'click', function (evt) {
+            evt.preventDefault();
+
+            upstreamStatsTimerPaused = !upstreamStatsTimerPaused;
+            enableControls();
+        });    
+
+        fm.liveswitch.Util.observe(downStreamStatsMonitorButton1, 'click', function (evt) {
+            evt.preventDefault();
+
+            downstreamStatsTimer1Paused = !downstreamStatsTimer1Paused;
+            enableControls();
+        });    
+
+        fm.liveswitch.Util.observe(videoInputsList, 'change', function (evt) {
+            evt.preventDefault();
+
+            videoInputsList.disabled = true;
+            if (localMedia){
+                var id = videoInputsList.options[videoInputsList.selectedIndex].value;
+                var name = videoInputsList.options[videoInputsList.selectedIndex].text;
+
+
+                localMediaStopping = true;
+                stopLocalMedia().then(() => {
+                    localMediaStopping = false;
+                    localMediaRunning = false;
+                    stopLocalMediaButton.innerHTML = "Stop Local Media";
+                    enableControls();
+
+                    localMediaStarting = true;
+                    startLocalMedia(true).then(() => {
+                        localMediaStarting = false;
+                        localMediaRunning = true;
+                        videoInputsList.disabled = false;
+                        startLocalMediaNativeButton.innerHTML = "Start Local Media (Native)";
+                        enableControls();
+                        
+                        if (upStreamSfuConnection !== null){
+                            upStreamSfuConnection.close().then(() => {
+                                openSfuUpstreamConnection();
+                            });
+                        }
+                    });
+                });
+            }
+        });                  
+
+        log = function(message){
+            fm.liveswitch.Log.debug(message);
+            debugConsoleMessages.scrollTop = debugConsoleMessages.scrollHeight;
+        }
+
+        enableControls = function(){
+            audioInputsList.disabled = (audioInputsList.options.length > 0) === false;
+            videoInputsList.disabled = (videoInputsList.options.length > 0) === false;
+
+            startLocalMediaNativeButton.disabled = !((localMediaStarting === false) && (localMediaRunning === false));
+            startLocalMediaFmButton.disabled = true;
+            stopLocalMediaButton.disabled = !((localMediaStopping === false) && (localMediaRunning === true));
+
+            joinSfuButton.disabled = !((localMediaRunning === true) && ((joiningConference === false) && (joinedConference === false)));
+            leaveConferenceButton.disabled = !((leavingConference === false) && (joinedConference === true));
+            muteLocalAudioButton.disabled = leaveConferenceButton.disabled;
+            muteLocalVideoButton.disabled = leaveConferenceButton.disabled;
+
+            upStreamStatsMonitorButton.disabled = leaveConferenceButton.disabled;
+            upStreamStatsMonitorButton.innerHTML = upstreamStatsTimerPaused === true ? "Start Upstream Stats Monitor" : "Stop Upstream Stats Monitor"
+
+            var anySfuDownStreamsAvailable = (Object.keys(sfuDownstreamConnections).length > 0);
+            muteRemoteAudioButton1.disabled = !(anySfuDownStreamsAvailable);
+            muteRemoteVideoButton1.disabled = !(anySfuDownStreamsAvailable);
+            downStreamStatsMonitorButton1.disabled = !(anySfuDownStreamsAvailable);
+            downStreamStatsMonitorButton1.innerHTML = downstreamStatsTimer1Paused === true ? "Start Downstream1 Stats Monitor" : "Stop Downstream1 Stats Monitor"
+            if (downstreamSfuConnection1 !== null){
+                muteRemoteAudioButton1.innerHTML = anySfuDownStreamsAvailable === true ? "Mute Remote Audio" : "UnMute Remote Audio";
+                muteRemoteVideoButton1.innerHTML = anySfuDownStreamsAvailable === true ? "Mute Remote Video" : "UMute Remote Video";
+            }
+
+            setUpstreamBitrate128Button.disabled = leaveConferenceButton.disabled;
+            setUpstreamBitrate512Button.disabled = leaveConferenceButton.disabled;
+            setUpstreamBitrate1024Button.disabled = leaveConferenceButton.disabled;
+        }
+
+        function getMediaDevices(){
+            var promise = new fm.liveswitch.Promise();
+            navigator.mediaDevices.enumerateDevices().then(devices => {
+                log("Enumerating input devices...");
+
+                for (var i = 0; i < devices.length; i++){
+                    if (devices[i].kind === "audioinput" || devices[i].kind =="videoinput"){
+                        var type = devices[i].kind === "audioinput" ? "AUDIO" : "VIDEO";
+
+                        if (devices[i].deviceId.length === 64){ //could be a better way to determine this
+                            var opt = document.createElement('option');
+                            opt.value = devices[i].deviceId;
+                            opt.innerHTML = devices[i].label;
+                            type === "AUDIO" ? audioInputsList.appendChild(opt) : videoInputsList.appendChild(opt);
+                        }                        
+
+                        log(type + " : " + devices[i].label);
+                    }
+                }
+
+                promise.resolve(devices)
+            });            
+
+            return promise;
+        }        
+
+        startLocalMedia = function(nativeMode){
+            var promise = new fm.liveswitch.Promise();
+            localMediaStarting = true;
+            startLocalMediaNativeButton.innerHTML = "Starting...";
+            enableControls();
+
+            if (nativeMode === true){
+                var selectedAudioInputDevice = audioInputsList.options[audioInputsList.selectedIndex].value;
+                var selectedVideoInputDevice = videoInputsList.options[videoInputsList.selectedIndex].value;
+
+                const constraints = {
+                    audio: {deviceId: {exact: selectedAudioInputDevice}},
+                    video: {deviceId: {exact: selectedVideoInputDevice}}
+                };                
+
+                // var stream = navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((mediaStream) => {
+                var stream = navigator.mediaDevices.getUserMedia(constraints).then((mediaStream) => {
+                    nativeVideoStream = new MediaStream();
+                    nativeVideoStream.addTrack(mediaStream.getVideoTracks()[0]);
+                    nativeAudioStream = new MediaStream();
+                    nativeAudioStream.addTrack(mediaStream.getAudioTracks()[0]);
+                    localMedia = new fm.liveswitch.LocalMedia(nativeAudioStream, nativeVideoStream);
+
+                    localMedia.start().then((lm) => {
+                        var localVideoTrack = localMedia.getVideoTrack();
+                        if (localVideoTrack != null) {
+                            //use either directly from native or from fm
+                            var nativeMediaStream = lm.getVideoTrack().getMedia()._internal._getVideoMediaStream();
+                            //var nativeMediaStream = mediaStream;
+
+                            localMediaContainer.srcObject  = nativeMediaStream;
+                        }
+                    });
+                    
+                    promise.resolve(localMedia);
+                }); 
+
+                return promise;                     
+            }
+            //setup localmedia and layout manager using fm
+            else {
+
+            }
+        }
+
+        setBitrate = function(bitrate, connection) {
+            var internalConnection = connection._internalConnection;
+
+            var offer = new fm.liveswitch.SessionDescription();
+            offer.setTieBreaker(fm.liveswitch.Guid.newGuid().toString());
+            offer.setType(fm.liveswitch.SessionDescriptionType.Offer);
+            offer.setSdpMessage(fm.liveswitch.sdp.Message.parse(internalConnection.getLocalDescription().getSdpMessage().toString()));
+            offer.getSdpMessage().getOrigin().setSessionVersion(offer.getSdpMessage().getOrigin().getSessionVersion() + 1);
+
+            var answer = new fm.liveswitch.SessionDescription();
+            answer.setRenegotiation(true);
+            answer.setTieBreaker(fm.liveswitch.Guid.newGuid().toString());
+            answer.setType(fm.liveswitch.SessionDescriptionType.Answer);
+            answer.setSdpMessage(fm.liveswitch.sdp.Message.parse(internalConnection.getRemoteDescription().getSdpMessage().toString()));
+            answer.getSdpMessage().getOrigin().setSessionVersion(answer.getSdpMessage().getOrigin().getSessionVersion() + 1);
+
+            var sdpVideoDescription = answer.getSdpMessage().getVideoDescription();
+            if (sdpVideoDescription) {
+                for (var oldBandwidth of sdpVideoDescription.getBandwidths()) {
+                    sdpVideoDescription.removeBandwidth(oldBandwidth);
+                }
+                if (bitrate > 0) {
+                    sdpVideoDescription.addBandwidth(new fm.liveswitch.sdp.Bandwidth(fm.liveswitch.sdp.BandwidthType.getApplicationSpecific(), bitrate));
+                    sdpVideoDescription.addBandwidth(new fm.liveswitch.sdp.Bandwidth(fm.liveswitch.sdp.BandwidthType.getTransportIndependentApplicationSpecificMaximum(), bitrate * 1000));
+                }
+            }
+
+            internalConnection.setLocalDescription(offer).then((localDescription) => {
+                internalConnection.setRemoteDescription(answer).then((remoteDescription) => {
+                    log('Updated sending bitrate for connection ' + connection.getId() + ' to ' + bitrate + ' kbps.');
+                }, (ex) => {
+                    log('Could not set bitrate - remote description (answer) could not be set.', ex);
+                })
+            }, (ex) => {
+                log('Could not set bitrate - local description (offer) could not be set.', ex);
+            });
+        }        
+
+        stopLocalMedia = function(){
+            var promise = new fm.liveswitch.Promise();
+            localMediaStopping = true;
+            stopLocalMediaButton.innerHTML = "Stopping...";
+            enableControls();
+                try {
+                    if (localMedia == null) {
+                        promise.resolve(null);
+                        return promise;
+                    }
+
+                    localMedia.stop().then(function (o) {
+                        // Tear down the local media.
+                        if (localMedia != null) {
+                            localMedia = null;
+                        }
+                        localMediaRunning = false;
+                        promise.resolve(null);
+                    }, function (ex) {
+                        promise.reject(ex);
+                    });
+                }
+                catch (ex) {
+                    promise.reject(ex);
+                }
+                return promise;        
+        }       
+
+        generateToken = function (claims) {
+            return fm.liveswitch.Token.generateClientRegisterToken(applicationId, client.getUserId(), client.getDeviceId(), client.getId(), null, claims, sharedSecret);
+        };
+
+        joinConference = function (clientRegistered) {
+            log("Joining to gateway: " + gatewayUrl + ", channel: " + channelIdText.value.toString());
+            joiningConference = true;
+            joinSfuButton.innerHTML = "Joining...";
+            enableControls();
+            var promise = new fm.liveswitch.Promise();
+            unRegistering = false;
+            // Create a client to manage the channel.
+            client = new fm.liveswitch.Client(gatewayUrl, applicationId, userId, deviceId);
+            var claims = [new fm.liveswitch.ChannelClaim(channelIdText.value.toString())];
+            // Use the optional tag field to indicate our mode.
+            client.setTag(mode.toString());
+            client.setUserAlias(userName);
+            var token = generateToken(claims);
+            client.addOnStateChange(function (client) {
+                if (client.getState() == fm.liveswitch.ClientState.Registering) {
+                    log("client is registering");
+                }
+                else if (client.getState() == fm.liveswitch.ClientState.Registered) {
+                    log("client is registered");
+                }
+                else if (client.getState() == fm.liveswitch.ClientState.Unregistering) {
+                    log("client is unregistering");
+                }
+                else if (client.getState() == fm.liveswitch.ClientState.Unregistered) {
+                    log("client is unregistered");
+                }
+            });
+
+            // Register with the server.
+            client.register(token).then(function (channels) {
+                onClientRegistered(channels, incomingChannelMessage);
+                promise.resolve(null);
+            }, function (ex) {
+                promise.reject(ex);
+            });
+            return promise;
+        };
+
+
+        onClientRegistered = function (channels, incomingMessage) {
+            channel = channels[0];
+
+            // Monitor the channel remote client changes.
+            channel.addOnRemoteClientJoin(function (remoteClientInfo) {
+                log('Remote client joined the channel (client ID: ' +
+                    remoteClientInfo.getId() + ', device ID: ' + remoteClientInfo.getDeviceId() +
+                    ', user ID: ' + remoteClientInfo.getUserId() + ', tag: ' + remoteClientInfo.getTag() + ').');
+            });
+
+            channel.addOnRemoteClientLeave(function (remoteClientInfo) {
+                log('Remote client left the channel (client ID: ' + remoteClientInfo.getId() +
+                    ', device ID: ' + remoteClientInfo.getDeviceId() + ', user ID: ' + remoteClientInfo.getUserId() +
+                    ', tag: ' + remoteClientInfo.getTag() + ').');
+            });
+
+            // Monitor the channel remote upstream connection changes.
+            channel.addOnRemoteUpstreamConnectionOpen(function (remoteConnectionInfo) {
+                log('Remote client opened upstream connection (connection ID: ' +
+                    remoteConnectionInfo.getId() + ', client ID: ' + remoteConnectionInfo.getClientId() + ', device ID: ' +
+                    remoteConnectionInfo.getDeviceId() + ', user ID: ' + remoteConnectionInfo.getUserId() + ', tag: ' +
+                    remoteConnectionInfo.getTag() + ').');
+
+                if (mode == "SFU") {
+                    // Open downstream connection to receive the new upstream connection.
+                    openSfuDownstreamConnection(remoteConnectionInfo);
+                }
+            });
+
+            channel.addOnRemoteUpstreamConnectionClose(function (remoteConnectionInfo) {
+                log('Remote client closed upstream connection (connection ID: ' + remoteConnectionInfo.getId() +
+                    ', client ID: ' + remoteConnectionInfo.getClientId() + ', device ID: ' + remoteConnectionInfo.getDeviceId() +
+                    ', user ID: ' + remoteConnectionInfo.getUserId() + ', tag: ' + remoteConnectionInfo.getTag() + ').');
+            });
+
+            channel.addOnMessage(function (client, message) {
+                if (incomingMessage == null)
+                    return;
+
+                var n = client.getUserAlias() != null ? client.getUserAlias() : client.getUserId();
+                incomingMessage(n, message);
+            });
+
+            if (mode == "SFU") {
+                openSfuUpstreamConnection();
+
+                // Open a downstream SFU connection for each remote upstream connection.
+                for (var _i = 0, _a = channel.getRemoteUpstreamConnectionInfos(); _i < _a.length; _i++) {
+                    var remoteConnectionInfo = _a[_i];
+                    openSfuDownstreamConnection(remoteConnectionInfo);
+                }
+            }
+        };
+
+
+        openSfuUpstreamConnection = function (tag) {
+            var connection;
+            var dataChannel = null;
+            var dataStream = null;
+            var audioStream;
+            var videoStream;
+            if (localMedia.getAudioTrack() != null) {
+                 audioStream = new fm.liveswitch.AudioStream(localMedia);
+            }
+            if (localMedia.getVideoTrack() != null) {
+                videoStream = new fm.liveswitch.VideoStream(localMedia);
+            }
+            connection = channel.createSfuUpstreamConnection(audioStream, videoStream);
+            // Tag the connection (optional).
+            if (tag == null) {
+                tag = 'sfu-upstream';
+            }
+            connection.setTag(tag);
+            // Configure the connection.
+            connection.setIceServers(iceServers);
+
+            // Monitor the connection state changes.
+            connection.addOnStateChange(function (connection) {
+                log(connection.getId() + ': SFU upstream connection state is ' +
+                    new fm.liveswitch.ConnectionStateWrapper(connection.getState()).toString() + '.');
+
+                // Cleanup if the connection closes or fails.
+                if (connection.getState() == fm.liveswitch.ConnectionState.Closing ||
+                    connection.getState() == fm.liveswitch.ConnectionState.Failing) {
+                    if (connection.getRemoteClosed()) {
+                        log(connection.getId() + ': Media server closed the connection.');
+                    }
+                    upStreamSfuConnection = null;
+
+                    //stop stats timer
+                    if (upstreamStatsTimer !== null && upstreamStatsTimer > 0){
+                        clearInterval(upstreamStatsTimer);
+                        upstreamStatsTimerPaused = true;
+                    }
+                }
+                else if (connection.getState() == fm.liveswitch.ConnectionState.Failed) {
+                    // Note: no need to close the connection as it's done for us.
+                    openSfuUpstreamConnection(tag);
+                    //logConnectionState(connection, "SFU Upstream");
+                }
+                else if (connection.getState() == fm.liveswitch.ConnectionState.Connected) {
+                    upStreamSfuConnection = connection;
+
+                    joiningConference = false;
+                    joinedConference = true;                                    
+                    enableControls();
+
+                    //upstream stats
+                    upstreamStatsTimer = setInterval(function () {
+                        if (upstreamStatsTimerPaused === false){
+                            var connectionStats = connection.getStats().then(function (stats) {
+                                var senderAudio = stats.getAudioStream().getSender();
+                                var senderVideo = stats.getVideoStream().getSender();
+                                if (senderAudio && senderVideo) {
+                                    var audioBytesSent = senderAudio.getBytesSent().toString();
+                                    var videoBytesSent = senderVideo.getBytesSent().toString();
+                                    log("Upstream connection stats SENDER: Audio: " + audioBytesSent + " bytes sent. Video: " + videoBytesSent + " bytes sent");
+                                }
+                            });
+                        }
+                    }, 2000);
+
+                }
+            });
+
+            // Open the connection.
+            connection.open();
+            return connection;
+        };
+
+        openSfuDownstreamConnection = function (remoteConnectionInfo, tag) {
+            var remoteMedia = new fm.liveswitch.RemoteMedia();
+            remoteMedia.setAudioMuted(false);
+            remoteMedia.setVideoMuted(false);
+
+            var connection;
+            var dataChannel;
+            var dataStream;
+            var audioStream;
+            var videoStream;
+            if (remoteConnectionInfo.getHasAudio()) {
+                audioStream = new fm.liveswitch.AudioStream(localMedia, remoteMedia);
+            }
+            if (remoteConnectionInfo.getHasVideo()) {
+                videoStream = new fm.liveswitch.VideoStream(localMedia, remoteMedia);
+            }
+
+            connection = channel.createSfuDownstreamConnection(remoteConnectionInfo, audioStream, videoStream, dataStream);
+            sfuDownstreamConnections[connection.getId()] = connection;
+
+            // Tag the connection (optional).
+            if (tag == null) {
+                tag = 'sfu-downstream';
+            }
+            connection.setTag(tag);
+            // Configure the connection.
+            connection.setIceServers(iceServers);
+
+            // Monitor the connection state changes.
+            connection.addOnStateChange(function (connection) {
+                log(connection.getId() + ': SFU downstream connection state is ' +
+                    new fm.liveswitch.ConnectionStateWrapper(connection.getState()).toString() + '.');
+
+                // Cleanup if the connection closes or fails.
+                if (connection.getState() == fm.liveswitch.ConnectionState.Closing ||
+                    connection.getState() == fm.liveswitch.ConnectionState.Failing) {
+                    if (connection.getRemoteClosed()) {
+                        log(connection.getId() + ': Media server closed the connection.');
+                    }
+                    remoteMedia.destroy();
+
+                    //stop stats timer
+                    if (downstreamStatsTimer1 !== null && downstreamStatsTimer1 > 0){
+                        clearInterval(downstreamStatsTimer1);
+                        downstreamStatsTimer1Paused = true;
+                    }
+
+                    delete sfuDownstreamConnections[connection.getId()];
+                    downstreamSfuConnection1 = null;
+                    remoteMedia1 = null;
+                    enableControls();
+                }
+                else if (connection.getState() == fm.liveswitch.ConnectionState.Failed) {
+                    // Note: no need to close the connection as it's done for us.
+                    openSfuDownstreamConnection(remoteConnectionInfo, tag);
+                    //logConnectionState(connection, "SFU Downstream");
+                }
+                else if (connection.getState() == fm.liveswitch.ConnectionState.Connected) {
+                    downstreamSfuConnection1 = connection;
+                    remoteMedia1 = remoteMedia;
+                    var remoteMediaStream = connection._internalConnection._remoteMedia._internal._videoMediaStream;
+
+                    //ideally dynamically create this, just testing one connection for now
+                    remoteMediaContainer1.srcObject = remoteMediaStream;
+                    enableControls();
+
+                    //downstream stats
+                    downstreamStatsTimer1 = setInterval(function () {
+                        if (downstreamStatsTimer1Paused === false){
+                            var connectionStats = connection.getStats().then(function (stats) {
+                                var receiverAudio = stats.getAudioStream().getReceiver();
+                                var receiverVideo = stats.getVideoStream().getReceiver();
+                                if (receiverAudio && receiverVideo) {
+                                    var audioBytesReceived = receiverAudio.getBytesReceived().toString();
+                                    var videoBytesReceived = receiverVideo.getBytesReceived().toString();
+                                    log("Upstream connection stats RECEIVER: Audio: " + audioBytesReceived + " bytes received. Video: " + videoBytesReceived + " bytes received");
+                                }
+                            });
+                        }
+                    }, 2000);      
+                }
+            });
+            // Open the connection.
+            connection.open();
+            return connection;
+        };        
+
+        leaveConference = function(){
+            leavingConference = true;
+            enableControls();
+            if (client != null) {
+                unRegistering = true;
+                // Unregister with the server.
+                return client.unregister().then(function () {
+                }).fail(function () {
+                    log.debug("Failed to unregister client.");
+                });
+            }
+            else {
+                return fm.liveswitch.Promise.resolveNow(null);
+            }
+        }
+
+        incomingChannelMessage = function(message){
+            log("Incoming message: " + message);
+        }
+
+        //load list of input devices then enable UI
+        getMediaDevices().then((devices) =>{
+            enableControls();                        
+        });        
+
+        //update scrollbar position
+        setInterval(function(){
+            debugConsoleMessages.scrollTop = debugConsoleMessages.scrollHeight;
+        }, 500)
+
+    }); //onload
+
+   
+     
+
+</script>
+<body>
+    <div id="container" class="container">
+        <div id="top" class="top">
+            <div id="left" class="left">
+                <div class="box">
+                    <div class="header">Local Video</div>
+                    <video id="localVideo" class="localVideoContainer" autoplay></video> 
+                    <button id="muteLocalAudio" class="buttonVideo" disabled>Mute Local Audio</button>
+                    <button id="muteLocalVideo" class="buttonVideo" disabled>Mute Local Video</button>
+                    <button id="monitorUpstreamStats" class="buttonVideo" disabled>Start Upstream Stats Monitor</button>
+                    <button id="setUpstreamBitrate128" class="buttonVideo" disabled>Set UpStream Bitrate = 128</button>    
+                    <button id="setUpstreamBitrate512" class="buttonVideo" disabled>Set UpStream Bitrate = 512</button>    
+                    <button id="setUpstreamBitrate1024" class="buttonVideo" disabled>Set UpStream Bitrate = 1024</button>    
+                </div>
+
+                <div class="box">
+                    <div class="header">Remote Video(1)</div>
+                    <video id="remoteVideo1" class="remoteVideoContainer" autoplay></video>                    
+                    <button id="muteRemoteAudio1" class="buttonVideo" disabled>Mute Remote Audio</button>
+                    <button id="muteRemoteVideo1" class="buttonVideo" disabled>Mute Remote Video</button>
+                    <button id="monitorDownstreamStats1" class="buttonVideo" disabled>Start Downstream Stats Monitor</button>
+                </div>                
+
+                <div class="box">
+                    <div class="header">Remote Video(2)</div>
+                    <video id="remoteVideo2" class="remoteVideoContainer" autoplay></video>              
+                    <button id="muteRemoteAudio2" class="buttonVideo" disabled>Mute Remote Audio</button>
+                    <button id="muteRemoteVideo2" class="buttonVideo" disabled>Mute Remote Video</button>
+                    <button id="monitorDownstreamStats2" class="buttonVideo" disabled>Start Downstream Stats Monitor</button>      
+                </div>                                
+                
+            </div>
+            <div id="middle" class="verticalSpacer"></div>
+            <div id="right" class="right">
+                <div class="group">
+                    <div style="float: left;"><label for="audioInputs">Audio:</label></div>
+                    <div style="float: left;"><select id="audioInputs" disabled></select></div>                    
+                </div>                
+                <div class="group">
+                        <div style="float: left;"><label for="videoInputs">Video:</label></div>
+                        <div style="float: left;"><select id="videoInputs" disabled></select></div>                    
+                    </div>                
+
+                <button id="startLocalMediaNative" class="buttonMenu" disabled>Start Local Media (Native)</button>
+                <button id="startLocalMediaFm" class="buttonMenu" disabled>Start Local Media (FM)</button>
+                <button id="stopLocalMedia" class="buttonMenu" disabled>Stop Local Media</button>         
+                <button id="joinConference" class="buttonMenu" disabled>Join SFU</button>                
+                <button id="leaveConference" class="buttonMenu" disabled>Leave</button>
+
+                <div class="horizontalSpacer"></div>
+
+                <div class="group">
+                    <div style="float: left;"><label for="channelId">Channel:</label></div>
+                    <div style="float: left;"><input id="channelId" value="123456" size="4"></div>                    
+                    <div style="float: left;"><button id="resetChannelId" class="buttonMenu">Reset</button></div>                    
+                </div>
+
+                
+            </div>
+        </div>
+
+        <div class="horizontalSpacer"></div>
+
+        <div class="bottom">
+            <div contenteditable="true" id="debugConsoleMessages" class="debugConsoleMessages" scrollbars>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
